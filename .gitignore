@@ -1,0 +1,12 @@
+# WICHTIG: config.js enthält deinen GAS-URL und Secret Token
+# Diese Datei niemals committen!
+js/config.js
+
+# macOS
+.DS_Store
+**/.DS_Store
+
+# Editoren
+.vscode/
+.idea/
+*.swp
