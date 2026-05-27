@@ -189,7 +189,7 @@ function ocrWithDrive(blob) {
       file = Drive.Files.insert(
         { title: 'ocr_temp_' + Date.now(), mimeType: 'application/vnd.google-apps.document' },
         blob,
-        { convert: true }
+        { convert: true, ocr: true, ocrLanguage: 'de' }
       );
     } catch (v2err) {
       Logger.log('Drive v2 fehlgeschlagen: ' + v2err.message + ' — versuche v3');
@@ -202,7 +202,7 @@ function ocrWithDrive(blob) {
     }
 
     fileId = file.id;
-    Utilities.sleep(1500); // kurz warten bis Konvertierung abgeschlossen
+    Utilities.sleep(3000); // warten bis Drive OCR-Konvertierung abgeschlossen
     const text = DocumentApp.openById(fileId).getBody().getText();
     return text;
 
