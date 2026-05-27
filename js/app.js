@@ -1,5 +1,4 @@
 // Margin Watcher — Main App Logic
-// Requires js/config.js (not committed to git)
 
 let currentImageBase64 = null;
 let isProcessing = false;
@@ -7,14 +6,68 @@ let isProcessing = false;
 // ─── INIT ────────────────────────────────────────────────────────────────────
 
 document.addEventListener('DOMContentLoaded', () => {
-  if (typeof CONFIG === 'undefined') { showConfigError(); return; }
-
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('sw.js').catch(console.error);
   }
 
+  // Config priority: config.js (local dev) > localStorage (production)
+  if (typeof CONFIG === 'undefined') {
+    const stored = loadStoredConfig();
+    if (stored) {
+      window.CONFIG = stored;
+    } else {
+      showSettingsModal(true); // first-time setup
+      return;
+    }
+  }
+
   loadDashboard();
 });
+
+// ─── CONFIG STORAGE ──────────────────────────────────────────────────────────
+
+function loadStoredConfig() {
+  try {
+    const raw = localStorage.getItem('mw_config');
+    if (!raw) return null;
+    const c = JSON.parse(raw);
+    if (!c.GAS_URL || !c.TOKEN) return null;
+    return c;
+  } catch { return null; }
+}
+
+function saveConfigToStorage(gasUrl, token, mindestMarge) {
+  const cfg = { GAS_URL: gasUrl.trim(), TOKEN: token.trim(), MINDEST_MARGE: parseFloat(mindestMarge) || 0.30 };
+  localStorage.setItem('mw_config', JSON.stringify(cfg));
+  window.CONFIG = cfg;
+}
+
+function showSettingsModal(isFirstTime = false) {
+  const stored = loadStoredConfig() || {};
+  document.getElementById('settingsGasUrl').value = stored.GAS_URL || (typeof CONFIG !== 'undefined' ? CONFIG.GAS_URL : '');
+  document.getElementById('settingsToken').value  = stored.TOKEN   || (typeof CONFIG !== 'undefined' ? CONFIG.TOKEN   : '');
+  document.getElementById('settingsMarge').value  = stored.MINDEST_MARGE || (typeof CONFIG !== 'undefined' ? CONFIG.MINDEST_MARGE : 0.30);
+  document.getElementById('settingsFirstTime').classList.toggle('hidden', !isFirstTime);
+  document.getElementById('settingsModal').classList.remove('hidden');
+}
+
+function closeSettingsModal() {
+  document.getElementById('settingsModal').classList.add('hidden');
+}
+
+function saveSettings() {
+  const url   = document.getElementById('settingsGasUrl').value.trim();
+  const token = document.getElementById('settingsToken').value.trim();
+  const marge = document.getElementById('settingsMarge').value;
+
+  if (!url || !token) { showToast('GAS URL und Token sind Pflichtfelder', 'error'); return; }
+  if (!url.startsWith('https://script.google.com/')) { showToast('Ungültige GAS URL', 'error'); return; }
+
+  saveConfigToStorage(url, token, marge);
+  closeSettingsModal();
+  showToast('Einstellungen gespeichert', 'success');
+  loadDashboard();
+}
 
 // ─── API ─────────────────────────────────────────────────────────────────────
 
@@ -277,29 +330,10 @@ function skipMapping(btn) {
   if (remaining.length === 0) document.getElementById('mappingSection').classList.add('hidden');
 }
 
-// ─── CONFIG ERROR ─────────────────────────────────────────────────────────────
+// ─── CONFIG ERROR (legacy) ────────────────────────────────────────────────────
 
 function showConfigError() {
-  document.getElementById('lastScan').textContent = 'Setup erforderlich';
-  document.getElementById('countCritical').textContent = '?';
-  document.getElementById('countWarning').textContent  = '?';
-  document.getElementById('countOk').textContent       = '?';
-  document.getElementById('alertsList').innerHTML = `
-    <div class="bg-orange-50 border border-orange-300 rounded-xl p-5">
-      <h3 class="font-bold text-orange-800 mb-2">⚙️ Einmalige Einrichtung</h3>
-      <p class="text-sm text-orange-700 mb-3">
-        Erstelle <code class="bg-orange-100 px-1 rounded font-mono text-xs">js/config.js</code>
-        aus der Vorlage <code class="bg-orange-100 px-1 rounded font-mono text-xs">js/config.template.js</code>.
-      </p>
-      <ol class="text-sm text-orange-700 list-decimal list-inside space-y-1.5">
-        <li>Google Apps Script deployen (Code aus <code class="font-mono text-xs">gas/Code.gs</code>)</li>
-        <li>Deployment-URL und Token in <code class="font-mono text-xs">config.js</code> eintragen</li>
-        <li>Seite neu laden</li>
-      </ol>
-      <p class="text-xs text-orange-500 mt-3">
-        ⚠️ <code class="font-mono">config.js</code> niemals committen — steht in <code class="font-mono">.gitignore</code>
-      </p>
-    </div>`;
+  // config.js not found locally — handled by localStorage settings flow in DOMContentLoaded
 }
 
 // ─── UTILS ───────────────────────────────────────────────────────────────────
