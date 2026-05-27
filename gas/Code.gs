@@ -281,10 +281,10 @@ function checkPricesAndLog(ss, positions, quelle, typ) {
     updateCurrentPrice(priceSheet, match.ZutatenID, neuPreis);
 
     if (delta > 0.02) { // > 2% Erhöhung
-      const betroffene    = getAffectedRecipes(ss, match.ZutatenID);
-      const worstMargin   = calculateWorstMargin(ss, match.ZutatenID, neuPreis);
-      const mindestMarge  = 0.30; // Fallback; kann aus Sheet-Metadaten gelesen werden
-      const flagTyp       = worstMargin < mindestMarge ? 'CRITICAL' : 'WARNING';
+      const betroffene    = getAffectedRecipesFromTabelle1(ss, match.Name);
+      const worstMargin   = getWorstMarginFromTabelle1(ss);
+      const mindestMarge  = 0.30;
+      const flagTyp       = (worstMargin > 0 && worstMargin < mindestMarge) ? 'CRITICAL' : 'WARNING';
 
       logFlag(ss, {
         typ:              flagTyp,
@@ -302,42 +302,46 @@ function checkPricesAndLog(ss, positions, quelle, typ) {
   return flagCount;
 }
 
-// ─── MARGENBERECHNUNG ─────────────────────────────────────────────────────────
+// ─── MARGENBERECHNUNG (liest direkt aus Tabelle1) ─────────────────────────────
 
-function getAffectedRecipes(ss, zutatenId) {
-  const rezepte = sheetToObjects(getOrCreateSheet(ss, 'Rezepte',
-    ['RezeptID','GerichtName','ZutatenID','MengeBenoetigt','VerkaufspreisNetto','MindestMarge']));
-  return rezepte.filter(r => r.ZutatenID === zutatenId).map(r => r.GerichtName);
+// Liest alle aktiven Gerichte aus Tabelle1 und gibt alle zurück, die die Zutat
+// enthalten könnten (da keine Stückliste → alle aktiven Gerichte als Worst-Case)
+function getAffectedRecipesFromTabelle1(ss, zutatName) {
+  const sheet = ss.getSheetByName('Tabelle1');
+  if (!sheet) return [];
+  const data = sheet.getDataRange().getValues();
+  const result = [];
+  let archiv = false;
+  for (let i = 1; i < data.length; i++) {
+    const name = String(data[i][0] || '').trim();
+    if (name.toUpperCase() === 'ARCHIV') { archiv = true; continue; }
+    if (archiv || !name) continue;
+    const vk = parseFloat(String(data[i][1] || '0').replace('€','').replace(',','.'));
+    if (vk > 0) result.push(name);
+  }
+  return result;
 }
 
-function calculateWorstMargin(ss, zutatenId, neuPreis) {
-  const rezepte = sheetToObjects(getOrCreateSheet(ss, 'Rezepte',
-    ['RezeptID','GerichtName','ZutatenID','MengeBenoetigt','VerkaufspreisNetto','MindestMarge']));
-  const preise  = sheetToObjects(getOrCreateSheet(ss, 'Zutaten_Preise',
-    ['ZutatenID','Name','LieferantSKU','AktuellerPreis','BasisPreis','Einheit','Zeitstempel']));
-
-  const priceMap = {};
-  preise.forEach(p => { priceMap[p.ZutatenID] = parseFloat(p.AktuellerPreis) || 0; });
-  priceMap[zutatenId] = neuPreis;
-
-  const rezeptIds = [...new Set(rezepte.filter(r => r.ZutatenID === zutatenId).map(r => r.RezeptID))];
-  if (rezeptIds.length === 0) return 1;
-
-  let worstMargin = 1;
-
-  for (const id of rezeptIds) {
-    const zutaten = rezepte.filter(r => r.RezeptID === id);
-    const vks = parseFloat(zutaten[0].VerkaufspreisNetto) || 0;
-    if (vks === 0) continue;
-
-    const kTotal = zutaten.reduce((sum, z) =>
-      sum + (priceMap[z.ZutatenID] || 0) * (parseFloat(z.MengeBenoetigt) || 0), 0);
-
-    const m = (vks - kTotal) / vks;
-    if (m < worstMargin) worstMargin = m;
+// Gibt die schlechteste aktuelle Marge aus Tabelle1 zurück (Spalte "% WE")
+function getWorstMarginFromTabelle1(ss) {
+  const sheet = ss.getSheetByName('Tabelle1');
+  if (!sheet) return 1;
+  const data = sheet.getDataRange().getValues();
+  const h = data[0].map(c => String(c).trim());
+  // Suche nach der Margenspalte (% WE oder ähnlich)
+  const margeCol = h.findIndex(c => c.includes('%') || c.toLowerCase().includes('we'));
+  if (margeCol < 0) return 1;
+  let worst = 1;
+  let archiv = false;
+  for (let i = 1; i < data.length; i++) {
+    const name = String(data[i][0] || '').trim();
+    if (name.toUpperCase() === 'ARCHIV') { archiv = true; continue; }
+    if (archiv || !name) continue;
+    let val = data[i][margeCol];
+    if (typeof val === 'string') val = parseFloat(val.replace('%','').replace(',','.')) / 100;
+    if (typeof val === 'number' && val > 0 && val < worst) worst = val;
   }
-
-  return worstMargin;
+  return worst;
 }
 
 // ─── FUZZY MATCHING ───────────────────────────────────────────────────────────
@@ -539,4 +543,74 @@ function setupTriggers() {
   ScriptApp.getProjectTriggers().forEach(t => ScriptApp.deleteTrigger(t));
   ScriptApp.newTrigger('scanGmail').timeBased().everyHours(1).create();
   Logger.log('✓ Trigger gesetzt: Gmail-Scan alle 60 Minuten');
+}
+
+// ─── EINMALIGER IMPORT: Artikelliste → Zutaten_Preise ────────────────────────
+// Einmal manuell ausführen: Ausführen → importArtikelliste
+
+function importArtikelliste() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+
+  // Quell-Sheet finden: erstes Sheet mit "ITEM" als erster Spalte
+  let sourceSheet = null;
+  for (const sh of ss.getSheets()) {
+    const first = sh.getRange(1, 1).getValue();
+    if (String(first).trim().toUpperCase() === 'ITEM') { sourceSheet = sh; break; }
+  }
+  if (!sourceSheet) {
+    Logger.log('❌ Kein Sheet mit "ITEM"-Spalte gefunden.');
+    return;
+  }
+  Logger.log('✓ Artikelliste gefunden: ' + sourceSheet.getName());
+
+  const data = sourceSheet.getDataRange().getValues();
+  const h    = data[0].map(c => String(c).trim());
+  const iItem    = h.findIndex(c => c.toUpperCase() === 'ITEM');
+  const iGroesse = h.findIndex(c => c.includes('ße') || c.includes('sse') || c.toLowerCase() === 'größe');
+  const iEinheit = h.findIndex(c => c.toLowerCase() === 'einheit');
+  const iPreis   = h.findIndex(c => c.includes('EK') || c.includes('Netto'));
+  const iLief    = h.findIndex(c => c.toLowerCase() === 'lieferant');
+
+  const ziel = getOrCreateSheet(ss, 'Zutaten_Preise',
+    ['ZutatenID','Name','LieferantSKU','AktuellerPreis','BasisPreis','Einheit','Zeitstempel']);
+  if (ziel.getLastRow() > 1)
+    ziel.getRange(2, 1, ziel.getLastRow() - 1, ziel.getLastColumn()).clearContent();
+
+  const SKIP = ['*auswahl', 'warenabgabe', 'archiv', 'fior di latte', ''];
+  let count = 0;
+
+  for (let i = 1; i < data.length; i++) {
+    const row  = data[i];
+    const name = String(row[iItem] || '').trim();
+    if (!name || SKIP.includes(name.toLowerCase())) continue;
+
+    const groesse = parseFloat(String(row[iGroesse >= 0 ? iGroesse : 1] || '1').replace(',', '.')) || 1;
+    const einheit = iEinheit >= 0 ? String(row[iEinheit] || '').trim() : '';
+    const ekRaw   = String(row[iPreis >= 0 ? iPreis : 3] || '0')
+      .replace(/€/g, '').replace(/\./g, '').replace(',', '.').trim();
+    const ekGes   = parseFloat(ekRaw) || 0;
+    const ekUnit  = groesse > 0 ? Math.round(ekGes / groesse * 10000) / 10000 : ekGes;
+    const liefSku = iLief >= 0 ? String(row[iLief] || '').trim() : '';
+
+    ziel.appendRow([
+      'Z_' + String(++count).padStart(3, '0'),
+      name, liefSku, ekUnit, ekUnit, einheit,
+      new Date().toISOString()
+    ]);
+  }
+
+  // False-Positive-Mappings bereinigen
+  const mSheet = ss.getSheetByName('Produkt_Mapping');
+  if (mSheet && mSheet.getLastRow() > 1) {
+    const FALSE_POS = ['lieferwert','summe','gesamt','total','mwst','netto','brutto','wareneinsatz'];
+    const mData = mSheet.getDataRange().getValues();
+    for (let i = mData.length - 1; i >= 1; i--) {
+      if (FALSE_POS.includes(String(mData[i][0]).toLowerCase().trim())) {
+        mSheet.deleteRow(i + 1);
+        Logger.log('🗑 False-Positive entfernt: ' + mData[i][0]);
+      }
+    }
+  }
+
+  Logger.log('✅ Import abgeschlossen: ' + count + ' Zutaten eingetragen.');
 }
