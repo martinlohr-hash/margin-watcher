@@ -183,19 +183,32 @@ function scanDelivery(base64Image) {
 function ocrWithDrive(blob) {
   let fileId = null;
   try {
-    // Drive konvertiert beim Upload automatisch in Google Doc → OCR wird angewendet
-    const file = Drive.Files.insert(
-      { title: 'ocr_temp_' + Date.now(), mimeType: 'application/vnd.google-apps.document' },
-      blob,
-      { convert: true }
-    );
-    fileId = file.id;
+    // Versuche Drive API v2 (Files.insert mit convert:true → OCR)
+    let file;
+    try {
+      file = Drive.Files.insert(
+        { title: 'ocr_temp_' + Date.now(), mimeType: 'application/vnd.google-apps.document' },
+        blob,
+        { convert: true }
+      );
+    } catch (v2err) {
+      Logger.log('Drive v2 fehlgeschlagen: ' + v2err.message + ' — versuche v3');
+      // Fallback: Drive API v3 (Files.create)
+      file = Drive.Files.create(
+        { name: 'ocr_temp_' + Date.now(), mimeType: 'application/vnd.google-apps.document' },
+        blob,
+        { convert: true }
+      );
+    }
 
+    fileId = file.id;
+    Utilities.sleep(1500); // kurz warten bis Konvertierung abgeschlossen
     const text = DocumentApp.openById(fileId).getBody().getText();
     return text;
+
   } catch (err) {
     Logger.log('OCR-Fehler: ' + err.message);
-    return '';
+    throw new Error('OCR fehlgeschlagen: ' + err.message); // Fehler weitergeben für bessere Fehlermeldung
   } finally {
     if (fileId) {
       try { DriveApp.getFileById(fileId).setTrashed(true); } catch (_) {}
